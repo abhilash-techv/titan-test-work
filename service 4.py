@@ -545,7 +545,7 @@ def get_anniversary_customer_sales_full(engine, date_range):
     merged["date"] = merged["date"].dt.strftime("%d/%m/%Y")
     return merged
 
-# ---------------- Tital Customer Transaction ----------------
+# ---------------- Total Customer Transaction ----------------
 def get_total_customer_transactions(engine, date_range):
     query = """
         SELECT invoice_date, cardno

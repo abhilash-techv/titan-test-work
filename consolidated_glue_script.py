@@ -93,9 +93,9 @@ txn_base = (
 )
 
 # --------------------------------------------------
-# MEMBER DATA (NORMALIZED CARD_NO + DOB)
+# MEMBER BASE (NORMALIZED CARD_NO)
 # --------------------------------------------------
-member_clean = (
+member_base = (
     member_df
     .filter(
         lower(col("enrollment_channel_code"))
@@ -105,9 +105,6 @@ member_clean = (
         "card_no",
         trim(regexp_replace(col("card_no").cast("string"), "\\.0$", ""))
     )
-    .withColumn("dob", to_date(col("dob")))  # adjust format if needed
-    .filter(col("dob").isNotNull())
-    .select("card_no", "dob")
 )
 
 # --------------------------------------------------
@@ -176,44 +173,99 @@ repeat_customer_sales_df = (
 )
 
 # --------------------------------------------------
-# BIRTHDAY CUSTOMER COUNT (±15 DAYS)
+# BIRTHDAY CUSTOMER BASE (±15 days)
 # --------------------------------------------------
-birthday_df = (
+birthday_base = (
     txn_base
-    .join(member_clean, on="card_no", how="inner")
+    .join(
+        member_base.withColumn("dob", to_date(col("dob"))),
+        on="card_no",
+        how="inner"
+    )
+    .filter(col("dob").isNotNull())
     .withColumn(
-        "birthday_this_year",
+        "event_this_year",
         when(
             (month(col("dob")) == 2) & (dayofmonth(col("dob")) == 29),
-            to_date(
-                concat(lit("28-02-"), year(col("invoice_date")).cast("string")),
-                "dd-MM-yyyy"
-            )
+            to_date(concat(lit("28-02-"), year(col("invoice_date"))), "dd-MM-yyyy")
         ).otherwise(
             to_date(
                 concat(
-                    dayofmonth(col("dob")).cast("string"),
+                    dayofmonth(col("dob")),
                     lit("-"),
-                    month(col("dob")).cast("string"),
+                    month(col("dob")),
                     lit("-"),
-                    year(col("invoice_date")).cast("string")
+                    year(col("invoice_date"))
                 ),
                 "d-M-yyyy"
             )
         )
     )
-    .withColumn(
-        "days_diff",
-        datediff(col("invoice_date"), col("birthday_this_year"))
-    )
+    .withColumn("days_diff", datediff(col("invoice_date"), col("event_this_year")))
     .filter((col("days_diff") >= -15) & (col("days_diff") <= 15))
 )
 
 birthday_customer_df = (
-    birthday_df
+    birthday_base
     .withColumn("date", trunc(col("invoice_date"), "DAY"))
     .groupBy("date")
     .agg(countDistinct("card_no").alias("birthdaycustomercount"))
+)
+
+birthday_customer_sales_df = (
+    birthday_base
+    .filter(col("eligible_amt").isNotNull())
+    .groupBy(trunc(col("invoice_date"), "DAY").alias("date"))
+    .agg(
+        spark_sum(col("eligible_amt").cast("double"))
+        .alias("birthdaycustomersales")
+    )
+)
+
+# --------------------------------------------------
+# ANNIVERSARY CUSTOMER BASE (±15 days)
+# --------------------------------------------------
+anniversary_base = (
+    txn_base
+    .join(
+        member_base.withColumn("anniversary", to_date(col("anniversary"))),
+        on="card_no",
+        how="inner"
+    )
+    .filter(col("anniversary").isNotNull())
+    .withColumn(
+        "event_this_year",
+        to_date(
+            concat(
+                year(col("invoice_date")),
+                lit("-"),
+                month(col("anniversary")),
+                lit("-"),
+                when(dayofmonth(col("anniversary")) > 28, 28)
+                .otherwise(dayofmonth(col("anniversary")))
+            ),
+            "yyyy-M-d"
+        )
+    )
+    .withColumn("days_diff", datediff(col("invoice_date"), col("event_this_year")))
+    .filter((col("days_diff") >= -15) & (col("days_diff") <= 15))
+)
+
+anniversary_customer_df = (
+    anniversary_base
+    .withColumn("date", trunc(col("invoice_date"), "DAY"))
+    .groupBy("date")
+    .agg(countDistinct("card_no").alias("anncustomercount"))
+)
+
+anniversary_customer_sales_df = (
+    anniversary_base
+    .filter(col("eligible_amt").isNotNull())
+    .groupBy(trunc(col("invoice_date"), "DAY").alias("date"))
+    .agg(
+        spark_sum(col("eligible_amt").cast("double"))
+        .alias("annvcustomersales")
+    )
 )
 
 # --------------------------------------------------
@@ -226,12 +278,18 @@ consolidated_df = (
     .join(new_customer_sales_df, on="date", how="left")
     .join(repeat_customer_sales_df, on="date", how="left")
     .join(birthday_customer_df, on="date", how="left")
+    .join(anniversary_customer_df, on="date", how="left")
+    .join(birthday_customer_sales_df, on="date", how="left")
+    .join(anniversary_customer_sales_df, on="date", how="left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
         "newcustomersales": 0.0,
         "repeatcustomersales": 0.0,
-        "birthdaycustomercount": 0
+        "birthdaycustomercount": 0,
+        "anncustomercount": 0,
+        "birthdaycustomersales": 0.0,
+        "annvcustomersales": 0.0
     })
 )
 
@@ -250,7 +308,10 @@ consolidated_df = (
         "repeatcustomercount",
         "newcustomersales",
         "repeatcustomersales",
-        "birthdaycustomercount"
+        "birthdaycustomercount",
+        "anncustomercount",
+        "birthdaycustomersales",
+        "annvcustomersales"
     )
 )
 
