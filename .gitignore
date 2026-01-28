@@ -1,0 +1,3 @@
+convert-excel-to-parquet-s3/.env
+convert-excel-to-parquet-s3/.gitignore
+convert-excel-to-parquet-s3/.venv
