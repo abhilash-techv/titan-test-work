@@ -569,6 +569,46 @@ campaigns_deployed_df = (
 )
 
 # --------------------------------------------------
+# TARGETED COUNT  ✅ FIXED
+# --------------------------------------------------
+
+campaign_df = glueContext.create_dynamic_frame.from_catalog(
+    database="titan-final-db",
+    table_name="campaign_data"
+).toDF()
+
+campaign_target_df = (
+    campaign_df
+    .withColumn(
+        "deploy_date",
+        when(
+            col("deployment_date").rlike("^[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+            to_date(col("deployment_date"), "dd-MM-yyyy")
+        ).when(
+            col("deployment_date").rlike("^[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+            to_date(col("deployment_date").substr(1, 10), "yyyy-MM-dd")
+        ).otherwise(None)
+    )
+    .withColumn(
+        "target_count_num",
+        when(
+            trim(col("target_count")).rlike("^[0-9]+$"),
+            trim(col("target_count")).cast("int")
+        ).otherwise(lit(0))
+    )
+    .filter(col("deploy_date").isNotNull())
+)
+
+targeted_count_df = (
+    campaign_target_df
+    .groupBy("deploy_date")
+    .agg(
+        spark_sum("target_count_num").alias("targetedcount")
+    )
+    .withColumnRenamed("deploy_date", "date")
+)
+
+# --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
 # --------------------------------------------------
 consolidated_df = (
@@ -593,6 +633,7 @@ consolidated_df = (
     .join(low_point_balance_df, "date", "left")
     .join(active_customers_df, "date", "left")
     .join(campaigns_deployed_df, "date", "left")
+    .join(targeted_count_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -613,7 +654,8 @@ consolidated_df = (
         "dormantcustomers": 0,
         "lowpointbalancecustomers": 0,
         "activecustomers": 0,
-        "campaignsdeployed": 0
+        "campaignsdeployed": 0,
+        "targetedcount": 0
     })
 )
 
@@ -647,7 +689,8 @@ consolidated_df = (
         "dormantcustomers",
         "lowpointbalancecustomers",
         "activecustomers",
-        "campaignsdeployed"
+        "campaignsdeployed",
+        "targetedcount"
     )
 )
 
