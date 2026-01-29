@@ -535,6 +535,38 @@ active_customers_df = (
     .withColumnRenamed("invoice_date", "date")
 )
 
+# --------------------------------------------------
+# CAMPAIGNS DEPLOYED  ✅ FIXED
+# --------------------------------------------------
+
+campaign_df = glueContext.create_dynamic_frame.from_catalog(
+    database="titan-final-db",
+    table_name="campaign_data"
+).toDF()
+
+campaign_normalized_df = (
+    campaign_df
+    .withColumn(
+        "deploy_date",
+        when(
+            col("deployment_date").rlike("^[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+            to_date(col("deployment_date"))
+        ).when(
+            col("deployment_date").rlike("^[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+            to_date(col("deployment_date"), "dd-MM-yyyy")
+        ).otherwise(None)
+    )
+    .filter(col("deploy_date").isNotNull())
+)
+
+campaigns_deployed_df = (
+    campaign_normalized_df
+    .groupBy("deploy_date")
+    .agg(
+        count("*").alias("campaignsdeployed")
+    )
+    .withColumnRenamed("deploy_date", "date")
+)
 
 # --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
@@ -560,6 +592,7 @@ consolidated_df = (
     .join(dormant_customers_df, "date", "left")
     .join(low_point_balance_df, "date", "left")
     .join(active_customers_df, "date", "left")
+    .join(campaigns_deployed_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -579,7 +612,8 @@ consolidated_df = (
         "diamondenthusiasts": 0,
         "dormantcustomers": 0,
         "lowpointbalancecustomers": 0,
-        "activecustomers": 0
+        "activecustomers": 0,
+        "campaignsdeployed": 0
     })
 )
 
@@ -612,7 +646,8 @@ consolidated_df = (
         "diamondenthusiasts",
         "dormantcustomers",
         "lowpointbalancecustomers",
-        "activecustomers"
+        "activecustomers",
+        "campaignsdeployed"
     )
 )
 
