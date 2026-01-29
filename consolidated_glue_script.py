@@ -7,13 +7,17 @@ from awsglue.utils import getResolvedOptions
 from pyspark.sql.functions import (
     col, lower, to_date,
     min as spark_min, max as spark_max,
-    count, countDistinct, sum as spark_sum,
+    count, countDistinct,
+    sum as spark_sum, avg as spark_avg,
     sequence, explode, lit, row_number,
     year, month, dayofmonth,
     datediff, when, trunc,
-    concat, regexp_replace, trim,
+    concat, concat_ws, collect_set,   # ✅ ADDED
+    regexp_replace, trim,
     add_months
 )
+
+
 from pyspark.sql.window import Window
 
 # --------------------------------------------------
@@ -689,6 +693,70 @@ incremental_rev_df = (
 )
 
 # --------------------------------------------------
+# CAMPAIGN DETAILS  ✅ NEW
+# --------------------------------------------------
+
+campaign_df = glueContext.create_dynamic_frame.from_catalog(
+    database="titan-final-db",
+    table_name="campaign_data"
+).toDF()
+
+campaign_details_df = (
+    campaign_df
+    .withColumn(
+        "deploy_date",
+        when(
+            col("deployment_date").rlike("^[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+            to_date(col("deployment_date"), "dd-MM-yyyy")
+        ).when(
+            col("deployment_date").rlike("^[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+            to_date(col("deployment_date").substr(1, 10), "yyyy-MM-dd")
+        ).otherwise(None)
+    )
+    .withColumn(
+        "sale_value_1",
+        when(
+            trim(col("sale_value_1")).rlike("^-?[0-9]+(\\.[0-9]+)?$"),
+            trim(col("sale_value_1")).cast("double")
+        ).otherwise(lit(0.0))
+    )
+    .withColumn(
+        "conversion_1",
+        when(
+            trim(col("conversion_1")).rlike("^-?[0-9]+(\\.[0-9]+)?$"),
+            trim(col("conversion_1")).cast("double")
+        ).otherwise(lit(0.0))
+    )
+    .filter(col("deploy_date").isNotNull())
+)
+
+campaign_agg_df = (
+    campaign_details_df
+    .groupBy("deploy_date")
+    .agg(
+        spark_sum("sale_value_1").alias("sale_value_1"),
+        spark_avg("conversion_1").alias("conversion_1"),
+        concat_ws(", ", collect_set("channel")).alias("channel"),
+        concat_ws(", ", collect_set("brand")).alias("brand"),
+        concat_ws(", ", collect_set("region")).alias("region")
+    )
+    .withColumnRenamed("deploy_date", "date")
+)
+
+# --------------------------------------------------
+# PREVIOUS MONTH BASE  ✅ NEW
+# --------------------------------------------------
+
+previous_month_base_df = (
+    date_df
+    .withColumn(
+        "previousmonthbase",
+        when(col("date") == lit("2025-06-01").cast("date"), lit(32980))
+        .otherwise(lit(0))
+    )
+)
+
+# --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
 # --------------------------------------------------
 consolidated_df = (
@@ -716,6 +784,8 @@ consolidated_df = (
     .join(targeted_count_df, "date", "left")
     .join(buyers_df, "date", "left")
     .join(incremental_rev_df, "date", "left")
+    .join(campaign_agg_df, "date", "left")
+    .join(previous_month_base_df.select("date", "previousmonthbase"), "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -739,7 +809,13 @@ consolidated_df = (
         "campaignsdeployed": 0,
         "targetedcount": 0,
         "buyers": 0,
-        "incrementalrev": 0.0
+        "incrementalrev": 0.0,
+        "sale_value_1": 0.0,
+        "conversion_1": 0.0,
+        "channel": "N/A",
+        "brand": "N/A",
+        "region": "N/A",
+        "previousmonthbase": 0
     })
 )
 
@@ -776,7 +852,13 @@ consolidated_df = (
         "campaignsdeployed",
         "targetedcount",
         "buyers",
-        "incrementalrev"
+        "incrementalrev",
+        "previousmonthbase",
+        "channel",
+        "brand",
+        "region",
+        "sale_value_1",
+        "conversion_1"
     )
 )
 
