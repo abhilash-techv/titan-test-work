@@ -609,6 +609,46 @@ targeted_count_df = (
 )
 
 # --------------------------------------------------
+# CAMPAIGN BUYERS  ✅ NEW
+# --------------------------------------------------
+
+campaign_df = glueContext.create_dynamic_frame.from_catalog(
+    database="titan-final-db",
+    table_name="campaign_data"
+).toDF()
+
+campaign_buyers_df = (
+    campaign_df
+    .withColumn(
+        "deploy_date",
+        when(
+            col("deployment_date").rlike("^[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+            to_date(col("deployment_date"), "dd-MM-yyyy")
+        ).when(
+            col("deployment_date").rlike("^[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+            to_date(col("deployment_date").substr(1, 10), "yyyy-MM-dd")
+        ).otherwise(None)
+    )
+    .withColumn(
+        "buyers_num",
+        when(
+            trim(col("buyers")).rlike("^[0-9]+$"),
+            trim(col("buyers")).cast("int")
+        ).otherwise(lit(0))
+    )
+    .filter(col("deploy_date").isNotNull())
+)
+
+buyers_df = (
+    campaign_buyers_df
+    .groupBy("deploy_date")
+    .agg(
+        spark_sum("buyers_num").alias("buyers")
+    )
+    .withColumnRenamed("deploy_date", "date")
+)
+
+# --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
 # --------------------------------------------------
 consolidated_df = (
@@ -634,6 +674,7 @@ consolidated_df = (
     .join(active_customers_df, "date", "left")
     .join(campaigns_deployed_df, "date", "left")
     .join(targeted_count_df, "date", "left")
+    .join(buyers_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -655,7 +696,8 @@ consolidated_df = (
         "lowpointbalancecustomers": 0,
         "activecustomers": 0,
         "campaignsdeployed": 0,
-        "targetedcount": 0
+        "targetedcount": 0,
+        "buyers": 0
     })
 )
 
@@ -690,7 +732,8 @@ consolidated_df = (
         "lowpointbalancecustomers",
         "activecustomers",
         "campaignsdeployed",
-        "targetedcount"
+        "targetedcount",
+        "buyers"
     )
 )
 
