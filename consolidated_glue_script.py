@@ -649,6 +649,46 @@ buyers_df = (
 )
 
 # --------------------------------------------------
+# INCREMENTAL REVENUE  ✅ NEW
+# --------------------------------------------------
+
+campaign_df = glueContext.create_dynamic_frame.from_catalog(
+    database="titan-final-db",
+    table_name="campaign_data"
+).toDF()
+
+campaign_incremental_df = (
+    campaign_df
+    .withColumn(
+        "deploy_date",
+        when(
+            col("deployment_date").rlike("^[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+            to_date(col("deployment_date"), "dd-MM-yyyy")
+        ).when(
+            col("deployment_date").rlike("^[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+            to_date(col("deployment_date").substr(1, 10), "yyyy-MM-dd")
+        ).otherwise(None)
+    )
+    .withColumn(
+        "incremental_rev_num",
+        when(
+            trim(col("incremental_rev")).rlike("^-?[0-9]+(\\.[0-9]+)?$"),
+            trim(col("incremental_rev")).cast("double")
+        ).otherwise(lit(0.0))
+    )
+    .filter(col("deploy_date").isNotNull())
+)
+
+incremental_rev_df = (
+    campaign_incremental_df
+    .groupBy("deploy_date")
+    .agg(
+        spark_sum("incremental_rev_num").alias("incrementalrev")
+    )
+    .withColumnRenamed("deploy_date", "date")
+)
+
+# --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
 # --------------------------------------------------
 consolidated_df = (
@@ -675,6 +715,7 @@ consolidated_df = (
     .join(campaigns_deployed_df, "date", "left")
     .join(targeted_count_df, "date", "left")
     .join(buyers_df, "date", "left")
+    .join(incremental_rev_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -697,7 +738,8 @@ consolidated_df = (
         "activecustomers": 0,
         "campaignsdeployed": 0,
         "targetedcount": 0,
-        "buyers": 0
+        "buyers": 0,
+        "incrementalrev": 0.0
     })
 )
 
@@ -733,7 +775,8 @@ consolidated_df = (
         "activecustomers",
         "campaignsdeployed",
         "targetedcount",
-        "buyers"
+        "buyers",
+        "incrementalrev"
     )
 )
 
