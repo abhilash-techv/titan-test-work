@@ -11,7 +11,8 @@ from pyspark.sql.functions import (
     sequence, explode, lit, row_number,
     year, month, dayofmonth,
     datediff, when, trunc,
-    concat, regexp_replace, trim
+    concat, regexp_replace, trim,
+    add_months
 )
 from pyspark.sql.window import Window
 
@@ -70,11 +71,10 @@ date_df = spark.range(1).select(
 )
 
 # --------------------------------------------------
-# BASE TRANSACTIONS
+# BASE TRANSACTIONS (NORMALIZED CARD_NO)
 # --------------------------------------------------
 txn_base = (
     txn_df
-    .filter(lower(col("channel")) == "tanishq")
     .withColumn(
         "card_no",
         trim(regexp_replace(col("card_no").cast("string"), "\\.0$", ""))
@@ -85,7 +85,7 @@ txn_base = (
 )
 
 # --------------------------------------------------
-# MEMBER BASE
+# MEMBER BASE (NORMALIZED CARD_NO)
 # --------------------------------------------------
 member_base = (
     member_df
@@ -95,6 +95,110 @@ member_base = (
         "card_no",
         trim(regexp_replace(col("card_no").cast("string"), "\\.0$", ""))
     )
+    .withColumn("enrollment_date", to_date(col("enrollment_date")))
+    .filter(col("enrollment_date").isNotNull())
+)
+
+# --------------------------------------------------
+# FIRST TANISHQ TRANSACTION PER CUSTOMER
+# --------------------------------------------------
+first_tanishq_txn = (
+    txn_base
+    .filter(lower(col("channel")) == "tanishq")
+    .groupBy("card_no")
+    .agg(spark_min("invoice_date").alias("first_ta_date"))
+)
+
+# --------------------------------------------------
+# PRIOR OTHER-CHANNEL TRANSACTIONS
+# --------------------------------------------------
+prior_other_txn = (
+    txn_base
+    .filter(lower(col("channel")) != "tanishq")
+    .join(first_tanishq_txn, "card_no", "inner")
+    .filter(col("invoice_date") < col("first_ta_date"))
+    .select("card_no")
+    .distinct()
+)
+
+# --------------------------------------------------
+# ENROLLED BEFORE FIRST TANISHQ TRANSACTION
+# --------------------------------------------------
+enrolled_before_ta = (
+    member_base
+    .join(first_tanishq_txn, "card_no", "inner")
+    .filter(col("enrollment_date") < col("first_ta_date"))
+    .select("card_no")
+    .distinct()
+)
+
+# --------------------------------------------------
+# CROSS CHANNEL BUYERS
+# --------------------------------------------------
+cross_channel_buyers = (
+    first_tanishq_txn
+    .join(
+        prior_other_txn.union(enrolled_before_ta),
+        "card_no",
+        "inner"
+    )
+)
+
+cross_channel_buyers_df = (
+    cross_channel_buyers
+    .groupBy("first_ta_date")
+    .agg(count("card_no").alias("crosschannelbuyers"))
+    .withColumnRenamed("first_ta_date", "date")
+)
+
+
+# --------------------------------------------------
+# LAST TRANSACTION PER CUSTOMER
+# --------------------------------------------------
+last_txn_df = (
+    txn_base
+    .groupBy("card_no")
+    .agg(spark_max("invoice_date").alias("last_transaction_date"))
+)
+
+# --------------------------------------------------
+# MEMBERS ARCHIVED PER DAY  ✅ NEW
+# --------------------------------------------------
+members_with_last_txn = (
+    member_base
+    .join(last_txn_df, "card_no", "left")
+)
+
+members_archived_df = (
+    date_df
+    .join(
+        members_with_last_txn,
+        members_with_last_txn.enrollment_date <= col("date"),
+        "left"
+    )
+    .withColumn(
+        "threshold_date",
+        add_months(col("date"), -36)
+    )
+    .filter(
+        (col("last_transaction_date").isNull()) |
+        (col("last_transaction_date") < col("threshold_date"))
+    )
+    .groupBy("date")
+    .agg(countDistinct("card_no").alias("membersarchived"))
+)
+
+
+# --------------------------------------------------
+# DAILY ENROLLED CUSTOMERS  ✅ NEW
+# --------------------------------------------------
+daily_enrolled_df = (
+    member_base
+    .withColumn("enrollment_date", to_date(col("enrollment_date")))
+    .filter(col("enrollment_date").isNotNull())
+    .groupBy("enrollment_date")
+    .agg(countDistinct("card_no").alias("enrolledcustomercount"))
+    .withColumnRenamed("enrollment_date", "date")
 )
 
 # --------------------------------------------------
@@ -142,10 +246,8 @@ new_customer_sales_df = (
     .filter(col("invoice_date") == col("first_purchase_date"))
     .filter(col("eligible_amt").isNotNull())
     .groupBy("invoice_date")
-    .agg(
-        spark_sum(col("eligible_amt").cast("double"))
-        .alias("newcustomersales")
-    )
+    .agg(spark_sum(col("eligible_amt").cast("double"))
+         .alias("newcustomersales"))
     .withColumnRenamed("invoice_date", "date")
 )
 
@@ -153,10 +255,8 @@ repeat_customer_sales_df = (
     repeat_txns
     .filter(col("eligible_amt").isNotNull())
     .groupBy("invoice_date")
-    .agg(
-        spark_sum(col("eligible_amt").cast("double"))
-        .alias("repeatcustomersales")
-    )
+    .agg(spark_sum(col("eligible_amt").cast("double"))
+         .alias("repeatcustomersales"))
     .withColumnRenamed("invoice_date", "date")
 )
 
@@ -329,6 +429,84 @@ customer_anniversaries_perday_df = (
 )
 
 # --------------------------------------------------
+# DIAMOND ENTHUSIASTS  ✅ NEW
+# --------------------------------------------------
+diamond_enthusiasts_df = (
+    txn_base
+    .filter(lower(col("channel")) == "tanishq")
+    .filter(lower(col("category")).contains("diamond"))
+    .join(
+        member_base.select("card_no"),
+        "card_no",
+        "inner"
+    )
+    .groupBy("invoice_date")
+    .agg(
+        countDistinct("card_no").alias("diamondenthusiasts")
+    )
+    .withColumnRenamed("invoice_date", "date")
+)
+
+# --------------------------------------------------
+# DORMANT CUSTOMERS  ✅ NEW
+# --------------------------------------------------
+
+# Last eligible Tanishq transaction per customer
+last_txn_df = (
+    txn_base
+    .filter(col("eligible_amt") != 0)
+    .filter(lower(col("channel")) == "tanishq")
+    .groupBy("card_no")
+    .agg(spark_max("invoice_date").alias("last_txn_date"))
+)
+
+# Eligible members (points > 50)
+eligible_members_df = (
+    member_base
+    .filter(col("point_balance") > 50)
+    .join(last_txn_df, "card_no", "left")
+    .filter(col("last_txn_date").isNotNull())
+)
+
+# Dormant customers per day (last txn < date - 6 months)
+dormant_customers_df = (
+    date_df
+    .join(
+        eligible_members_df,
+        eligible_members_df.last_txn_date < add_months(col("date"), -6),
+        "left"
+    )
+    .groupBy("date")
+    .agg(
+        countDistinct("card_no").alias("dormantcustomers")
+    )
+)
+
+# --------------------------------------------------
+# LOW POINT BALANCE CUSTOMERS  ✅ NEW
+# --------------------------------------------------
+
+low_point_members_df = (
+    member_base
+    .withColumn("enrollment_date", to_date(col("enrollment_date")))
+    .filter(col("point_balance") < 50)
+)
+
+low_point_balance_df = (
+    date_df
+    .join(
+        low_point_members_df,
+        low_point_members_df.enrollment_date <= col("date"),
+        "left"
+    )
+    .groupBy("date")
+    .agg(
+        countDistinct("card_no").alias("lowpointbalancecustomers")
+    )
+)
+
+
+# --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
 # --------------------------------------------------
 consolidated_df = (
@@ -345,6 +523,12 @@ consolidated_df = (
     .join(transacted_customer_sales_df, "date", "left")
     .join(customer_birthdays_perday_df, "date", "left")
     .join(customer_anniversaries_perday_df, "date", "left")
+    .join(daily_enrolled_df, "date", "left")
+    .join(members_archived_df, "date", "left")
+    .join(cross_channel_buyers_df, "date", "left")
+    .join(diamond_enthusiasts_df, "date", "left")
+    .join(dormant_customers_df, "date", "left")
+    .join(low_point_balance_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -357,12 +541,18 @@ consolidated_df = (
         "totalcustomertransactions": 0,
         "transactedcustomersales": 0.0,
         "customerbirthdaysperday": 0,
-        "customeranniversariesperday": 0
+        "customeranniversariesperday": 0,
+        "enrolledcustomercount": 0,
+        "membersarchived": 0,
+        "crosschannelbuyers": 0,
+        "diamondenthusiasts": 0,
+        "dormantcustomers": 0,
+        "lowpointbalancecustomers": 0
     })
 )
 
 # --------------------------------------------------
-# ADD ID + FINAL ORDER (LOCKED)
+# FINAL ORDER (LOCKED)
 # --------------------------------------------------
 window_spec = Window.orderBy(col("date").desc())
 
@@ -383,9 +573,16 @@ consolidated_df = (
         "totalcustomertransactions",
         "transactedcustomersales",
         "customerbirthdaysperday",
-        "customeranniversariesperday"
+        "customeranniversariesperday",
+        "enrolledcustomercount",
+        "membersarchived",
+        "crosschannelbuyers",
+        "diamondenthusiasts",
+        "dormantcustomers",
+        "lowpointbalancecustomers"
     )
 )
+
 
 # --------------------------------------------------
 # WRITE OUTPUT
