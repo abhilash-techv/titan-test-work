@@ -505,6 +505,36 @@ low_point_balance_df = (
     )
 )
 
+# --------------------------------------------------
+# ACTIVE CUSTOMERS  ✅ NEW
+# --------------------------------------------------
+
+# Active transaction base
+active_txn_base = (
+    txn_base
+    .filter(col("eligible_amt") != 0)
+    .filter(
+        lower(col("channel")).isin(
+            "tanishq", "encircle", "encirclewebsite", "ecommtanishq"
+        )
+    )
+    .join(
+        member_base.select("card_no", "enrollment_date"),
+        "card_no",
+        "inner"
+    )
+    .filter(col("invoice_date") >= col("enrollment_date"))
+)
+
+active_customers_df = (
+    active_txn_base
+    .groupBy("invoice_date")
+    .agg(
+        countDistinct("card_no").alias("activecustomers")
+    )
+    .withColumnRenamed("invoice_date", "date")
+)
+
 
 # --------------------------------------------------
 # FINAL CONSOLIDATION (NOTHING DROPPED)
@@ -529,6 +559,7 @@ consolidated_df = (
     .join(diamond_enthusiasts_df, "date", "left")
     .join(dormant_customers_df, "date", "left")
     .join(low_point_balance_df, "date", "left")
+    .join(active_customers_df, "date", "left")
     .fillna({
         "newcustomercount": 0,
         "repeatcustomercount": 0,
@@ -547,7 +578,8 @@ consolidated_df = (
         "crosschannelbuyers": 0,
         "diamondenthusiasts": 0,
         "dormantcustomers": 0,
-        "lowpointbalancecustomers": 0
+        "lowpointbalancecustomers": 0,
+        "activecustomers": 0
     })
 )
 
@@ -579,7 +611,8 @@ consolidated_df = (
         "crosschannelbuyers",
         "diamondenthusiasts",
         "dormantcustomers",
-        "lowpointbalancecustomers"
+        "lowpointbalancecustomers",
+        "activecustomers"
     )
 )
 
